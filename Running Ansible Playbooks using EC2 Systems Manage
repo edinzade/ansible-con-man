@@ -1,0 +1,116 @@
+Running Ansible Playbooks using EC2 Systems Manager Run Command and State Manager
+by Andres Silva | on 25 MAY 2017 | in Amazon EC2 Systems Manager*, Management Tools | Permalink |  Share
+If you are running complex workloads on AWS and managing large groups of instances, chances are you are using some form of configuration management. Configuration management tools are effective in automating the deployment and configuration of applications on hybrid instances. However, efficiently managing the distribution and execution of the playbooks or recipes, centrally managing the code, having a secure and scalable deployment mechanism and properly logging system changes is a challenge. To address this, some of our customers use tools like cron, Rundeck or others provided by configuration management vendors.
+
+State Manager and Run Command, part of EC2 Systems Manager, automate management tasks by providing a secure, and easy to use platform to maintain state and remotely execute commands on large groups of instances. Using these tools also addresses many of the common challenges of managing infrastructure at scale. Here are some of the benefits of these tools:
+
+Better security
+There is no need to open incoming ports to remotely execute the directives. This eliminates the need for using SSH
+You can use IAM to restrict and control access to the platform
+All command execution is audited via AWS Cloudtrail
+Performance and reliability
+Asynchronous execution of commands
+Commands are delivered and executed even when the system comes back from being offline
+Execute at scale by taking advantage of velocity control
+Control deployment rate if errors increase during deployment
+In this blog post, I will show you how to execute configuration management directives using Ansible on your instances using State Manager and Run Command, and the new “AWS-RunAnsiblePlaybook” public document. This document runs Ansible locally on your instances.
+
+Getting Started
+
+Pre-requisities
+
+Target instances must be set up as managed instances. To set up managed instances, please see here
+Ansible must be pre-installed on the instances. Please see the following section on installing Ansible
+For Amazon S3 URLs in the playbook field, the AWS Command line tools must be installed on the target instance or server
+Installing Ansible on target instances
+
+Ansible can be installed as part of the bootstrapping of the instance or with Run Command. The following is some reference information you can use to install Ansible on different Linux distributions:
+
+Amazon Linux
+For Amazon Linux Ansible can be installed using pip. You can use the following command.
+
+sudo pip install ansible
+Ubuntu
+For Ubuntu you can install Ansible using the default package manager. Use this command.
+
+sudo apt-get install ansible -y
+RedHat 7
+For RedHat 7 you can install Ansible by enabling the epel repo. Use the following commands:
+
+sudo rpm -Uvh https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+sudo yum -y install ansible
+Document Parameters
+
+The “AWS-RunAnsiblePlaybook” document has a few parameters that can be used to execute playbooks locally:
+
+Playbook – Use this parameter if you would like to pass the YAML text for the playbook directly
+Playbookurl – Use this parameter if you would like to specify a URL where the playbook file is stored. The URL can be a web (http or https) or an s3 URL in the form of s3://bucket-name/playbook.yml . For s3 URL there is a pre-requisite of the AWS Command line tools
+Extravars – This is a string list of additional variables that will be passed to Ansible for the execution of the playbook
+Check – This flag tells Ansible not to execute the actions of the playbook, but try to predict the outcome and log it. This is helpful for testing playbook execution
+Workflow
+
+The document performs a few checks and then execute the playbook specified in the parameter. Here is a summary of how the logic works:
+
+Check the Ansible version to determine if Ansible is present on the system. Having Ansible installed is a pre-requisite of this document. See prerequisites section and also the section on installing Ansible
+Determine if the playbook parameter was passed as YAML using the playbook variable text or a URL using the Playbookurl. Based on the input it will copy the data to a temporary playbook file for later execution
+Determine if the check option was selected and based on the input execute the proper ansible-playbook command
+State Manager Walkthrough
+
+Let’s walk through the process of using State Manager to set the desired state for an instance using Ansible Playbook. To understand better how you can use this new public document with State Manager, let’s imagine you have a fleet of servers running Apache. You want to make sure that the web server software is installed and running all the time.
+
+Step 1: Create Ansible playbook
+
+This playbook installs Apache and makes sure is running. It has some logic to use different package management tools depending on the operating system:
+
+- hosts: all
+    become: true
+
+    tasks:
+    - name: gather ec2 facts
+      action: ec2_facts
+
+    - name: install apache on redhat or centos instances
+      yum: name=httpd state=present
+      when: ansible_os_family == "RedHat"
+
+    - name: install apache on debian or ubuntu instances
+      apt: name=apache2 state=present
+      when: ansible_os_family == "Debian"
+
+    - name: enable apache on startup and start service for redhat or centos
+      service: name=httpd enabled=yes state=started
+      when: ansible_os_family == "RedHat"
+
+    - name: enable apache on startup and start service for debian or ubuntu
+      service: name=apache2 enabled=yes state=started
+      when: ansible_os_family == "Debian"
+Step 2: Create State Manager Association
+
+From the EC2 section of the AWS Console, select “State Manager” from the “System Manager Services” section of the left pane menu, and click on “Create Association”.
+
+Select the “AWS-RunAnsiblePlaybook” document, your target instances (or tag) and the application schedule. In the Parameters section, since the playbook will be specified as direct YAML text, let’s just paste it on the Playbook field and leave the Playbookurl field empty.
+
+
+
+In the Extravars field, we can enter any additional variables we would like to pass to the playbook for execution. In this case we are not using any additional variables, so we take the default. Select if you want to use the Check option.
+After you click the “Run” button, the console will display the Association ID of this run, which you can to see the result and verify the output from the console.
+
+After the association runs for the first time, you can see the results of the execution by navigating to the association and looking at the status column. Now every time the association runs it will run the playbook and this in turn will ensure the software is installed and running.
+
+Run Command Walkthrough
+
+Run Command lets you rate control remote execution by configuring maximum number of concurrent invocations and errors allowed. This feature will set a threshold to detect errors and stop the execution if the threshold is passed.
+
+Let’s walk through an example of using velocity control when running the AWS-RunAnsiblePlaybook Document. In this example, we will be running the AWS- RunAnsiblePlaybook document on 3 target instances. We will pass the playbook as an s3 URL. To do this you can use the following command:
+
+aws ssm send-command --document-name "AWS-RunAnsible" --instance-ids "i-02f6bdc3d73044db6" "i-0e6954b9ae36b4b68" "i-023834f459f1a9fe6" --max-errors 1 --parameters '{"extravars":["SSM=True"],"check":["False"],"playbook":["s3://andress-web/playbook.yml"]}' --timeout-seconds 600 --region us-east-1
+This command performs the following actions:
+
+Executes the document AWS- RunAnsiblePlaybook
+Sets the target instances
+Defines the max errors as 1. This means that if the execution encounters 1 error it will stop on the remaining targets
+Passes the parameters for the Ansible document
+It also sets a timeout of 600 seconds
+Conclusion
+
+In this post, we’ve showed you how to use State Manager and Run Command to deploy Ansible playbooks at scale. These tools are secure, easy to use platforms that let you perform remote administration and maintain state of your hybrid instances. You can control the rate at which you send commands, use fine-grained permissions, and use notifications to simplify your workflow.
